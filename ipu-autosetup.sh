@@ -132,6 +132,9 @@ else
   echo "!! Could not auto-detect OEM meta package. Install manually from the list above."
 fi
 
+# `linux-firmware` is a meta-package on newer Ubuntu releases and pulls in
+# linux-firmware-intel-graphics, which contains the IPU6/IPU7 CPD firmware.
+apt-get install -y linux-firmware
 apt install -y libcamhal0 v4l2loopback-dkms v4l-utils gstreamer1.0-tools
 
 if [ -n "$HAL" ]; then
@@ -141,7 +144,87 @@ else
   echo "!! Run 'ubuntu-drivers list' yourself and install the libcamhal-ipu6* entry manually."
 fi
 
-echo "== 5. Persist v4l2loopback module across reboots =="
+echo "== 5. Keep Intel IPU firmware in the initramfs =="
+# The prebuilt Ubuntu IPU module does not declare its firmware through
+# modinfo. Dracut can therefore omit it when rebuilding the initramfs during
+# a package update. The IPU driver then starts before the real root filesystem
+# is mounted and fails with:
+#   Requesting signed firmware intel/ipu/ipu6..._fw.bin failed
+# Explicitly include all shipped IPU and IVSC firmware so this works for IPU6,
+# IPU7, and different camera sensors, including future kernel rebuilds.
+install_ipu_firmware_into_initramfs() {
+  local firmware_dir="/usr/lib/firmware/intel"
+  local firmware
+  local -a firmware_files=()
+
+  shopt -s nullglob
+  for firmware in \
+    "$firmware_dir"/ipu/*.bin \
+    "$firmware_dir"/ipu/*.bin.zst \
+    "$firmware_dir"/vsc/*.bin \
+    "$firmware_dir"/vsc/*.bin.zst; do
+    [ -f "$firmware" ] && firmware_files+=("$firmware")
+  done
+  shopt -u nullglob
+
+  if [ "${#firmware_files[@]}" -eq 0 ]; then
+    echo "!! No Intel IPU/VSC firmware files found below $firmware_dir; skipping initramfs configuration."
+    return
+  fi
+
+  if command -v dracut >/dev/null 2>&1; then
+    mkdir -p /etc/dracut.conf.d
+    {
+      echo '# Keep Intel MIPI camera firmware available before the root filesystem mounts.'
+      printf 'install_items+="'
+      printf ' %q' "${firmware_files[@]}"
+      echo ' "'
+    } >/etc/dracut.conf.d/99-intel-mipi-camera-firmware.conf
+
+    echo "Rebuilding the current dracut initramfs with Intel MIPI camera firmware..."
+    dracut --force "/boot/initrd.img-$(uname -r)" "$(uname -r)"
+  elif command -v update-initramfs >/dev/null 2>&1; then
+    # Keep the same guarantee for Ubuntu installations still using
+    # initramfs-tools rather than dracut.
+    mkdir -p /etc/initramfs-tools/hooks
+    cat >/etc/initramfs-tools/hooks/intel-mipi-camera-firmware <<'EOF'
+#!/bin/sh
+PREREQ=""
+
+prereqs() {
+  echo "$PREREQ"
+}
+
+case "$1" in
+  prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+for firmware in \
+  /usr/lib/firmware/intel/ipu/*.bin \
+  /usr/lib/firmware/intel/ipu/*.bin.zst \
+  /usr/lib/firmware/intel/vsc/*.bin \
+  /usr/lib/firmware/intel/vsc/*.bin.zst; do
+  [ -f "$firmware" ] || continue
+  copy_file firmware "$firmware"
+done
+EOF
+    chmod 0755 /etc/initramfs-tools/hooks/intel-mipi-camera-firmware
+
+    echo "Rebuilding the current initramfs with Intel MIPI camera firmware..."
+    update-initramfs -u -k "$(uname -r)"
+  else
+    echo "!! Neither dracut nor update-initramfs is installed; cannot persist IPU firmware in the initramfs."
+  fi
+}
+
+install_ipu_firmware_into_initramfs
+
+echo "== 6. Persist v4l2loopback module across reboots =="
 # Without these two files, v4l2loopback would need a manual `modprobe` after
 # every boot and might come up with the wrong /dev/videoN number or without
 # exclusive_caps (which some apps like Chrome require to detect it as a
@@ -153,7 +236,7 @@ cat >/etc/modprobe.d/v4l2loopback.conf <<'EOF'
 options v4l2loopback devices=1 video_nr=0 card_label="Intel MIPI Camera" exclusive_caps=1
 EOF
 
-echo "== 6. Auto-probe the highest working resolution =="
+echo "== 7. Auto-probe the highest working resolution =="
 echo "Reboot is required before this step works (kernel modules must be freshly loaded)."
 echo "If you already rebooted after IPU6 modules were installed, probing now..."
 

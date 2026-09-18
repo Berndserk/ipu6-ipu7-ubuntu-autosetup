@@ -39,16 +39,21 @@ daily use.
 3. Detects your laptop vendor from DMI and adds the matching **Canonical OEM archive**
    (Dell → `somerville`, Lenovo → `sutton`, HP → `stella`; override via env vars for
    anything else).
-4. Auto-detects and installs the correct **`libcamhal-ipu6/7*` HAL plugin** for your
-   specific sensor/platform via `ubuntu-drivers list`.
-5. Sets up **`v4l2loopback`** to persist across reboots.
-6. **Auto-probes** the sensor for its actual highest working resolution (tries
+4. Installs Ubuntu's **`linux-firmware`** package and auto-detects the correct
+   **`libcamhal-ipu6/7*` HAL plugin** for your specific sensor/platform via
+   `ubuntu-drivers list`.
+5. Explicitly persists the Intel IPU and IVSC firmware in the initramfs, then rebuilds
+   the current image. This prevents `dracut` or `initramfs-tools` regeneration during
+   future package/kernel updates from omitting the firmware before the root filesystem
+   mounts.
+6. Sets up **`v4l2loopback`** to persist across reboots.
+7. **Auto-probes** the sensor for its actual highest working resolution (tries
    1920x1080 down to 640x480 against the real hardware) instead of guessing/hardcoding
    one.
-7. Installs a **systemd service** (`ipu6-camera.service`) that relays
+8. Installs a **systemd service** (`ipu6-camera.service`) that relays
    `icamerasrc → v4l2loopback` at the probed resolution — this replaces Ubuntu's
    built-in `v4l2-relayd`, which is known to crash-loop on several platforms.
-8. Adds `cam-on` / `cam-off` / `cam-status` shell aliases so you control the camera
+9. Adds `cam-on` / `cam-off` / `cam-status` shell aliases so you control the camera
    manually — the relay is **not** enabled to autostart at boot, since running it
    means the camera LED stays on and the sensor is actively streaming the whole time.
 
@@ -74,7 +79,7 @@ install of the same hardware).
 sudo bash ipu-autosetup.sh
 sudo reboot
 sudo bash ipu-autosetup.sh   # re-run once, so the kernel modules are loaded before
-                          # the resolution probe (step 6) runs
+                          # the resolution probe (step 7) runs
 ```
 
 Then, day to day:
@@ -112,6 +117,8 @@ ffplay -f v4l2 -pixel_format nv12 -video_size 1920x1080 /dev/video0
 ```bash
 cat /sys/class/video4linux/*/name          # confirm the sensor is detected
 sudo dmesg | grep -iE 'ipu6|ipu7|ivsc'     # kernel-side driver/firmware status
+sudo lsinitrd /boot/initrd.img-$(uname -r) | grep -i 'firmware/intel/ipu'
+                                           # confirm IPU firmware is in the initramfs
 v4l2-ctl --list-devices                    # confirm /dev/video0 (loopback) exists
 ls -la /usr/lib/libcamhal/plugins/         # confirm the correct *.so HAL plugin exists
 systemctl status ipu6-camera.service       # check the relay service
